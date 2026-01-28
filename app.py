@@ -4,6 +4,7 @@ import numpy as np
 import xgboost as xgb
 import joblib
 import plotly.graph_objects as go
+import math
 
 # --- KONFIGURACE ---
 MODEL_FILE = "ultimate_goals_model.json"
@@ -12,9 +13,21 @@ DATA_STATS_CSV = "data_stats.csv"
 DATA_ELO_CSV = "data_elo.csv"
 DATA_FIFA_CSV = "data_fifa.csv"
 
-st.set_page_config(page_title="⚽ AI Live Predictor", page_icon="⚡", layout="centered")
+st.set_page_config(page_title="ProBet AI Predictor", page_icon="⚽", layout="wide")
 
-# --- MAPPING (Musí zůstat, aby fungovaly týmy) ---
+# --- CUSTOM CSS (Pro hezčí vzhled) ---
+st.markdown("""
+<style>
+    .big-font { font-size:24px !important; font-weight: bold; }
+    .score-board { background-color: #1E1E1E; padding: 20px; border-radius: 10px; text-align: center; color: white; margin-bottom: 20px;}
+    .team-name { font-size: 28px; font-weight: bold; color: #E0E0E0; }
+    .score { font-size: 48px; font-weight: 800; color: #4CAF50; margin: 0 20px; }
+    .meta-info { color: #B0BEC5; font-size: 14px; }
+    .metric-card { background-color: #f0f2f6; padding: 15px; border-radius: 8px; border-left: 5px solid #4CAF50; }
+</style>
+""", unsafe_allow_html=True)
+
+# --- MAPPING FUNKCE ---
 def normalize_name(name):
     if name is None: return ""
     name = str(name).lower().strip()
@@ -65,6 +78,7 @@ def normalize_name(name):
         if key in name: return value
     return name
 
+# --- NAČÍTÁNÍ DAT ---
 @st.cache_resource
 def load_stuff():
     try:
@@ -102,45 +116,82 @@ def load_csv():
         return sorted(list(all_teams)), latest_elo, fifa_map, profiles
     except: return [], {}, {}, {}
 
+# --- POISSON CALCULATOR (Pro sázkové pravděpodobnosti) ---
+def poisson_probability(k, lamb):
+    return (lamb**k * math.exp(-lamb)) / math.factorial(k)
+
+def calculate_probs(predicted_total, current_goals):
+    remaining_lambda = max(0.01, predicted_total - current_goals)
+    
+    # Šance na přesně 0, 1, 2... dalších gólů
+    probs = {}
+    for i in range(6):
+        probs[i] = poisson_probability(i, remaining_lambda)
+    
+    # Cumulative probabilities (Over lines)
+    over_probs = {
+        f"Over {current_goals + 0.5}": 1.0 - probs[0], # Padne aspoň 1
+        f"Over {current_goals + 1.5}": 1.0 - (probs[0] + probs[1]), # Padnou aspoň 2
+        f"Over {current_goals + 2.5}": 1.0 - (probs[0] + probs[1] + probs[2]) # Padnou aspoň 3
+    }
+    return over_probs, remaining_lambda
+
 # --- UI START ---
 model, feat_names = load_stuff()
 teams, db_elo, db_fifa, db_profiles = load_csv()
 
-st.title("⚡ AI Live Predictor")
-
-# VÝBĚR TÝMŮ
-c1, c2 = st.columns(2)
-h_team = c1.selectbox("🏠 Domácí", teams, index=0)
-a_team = c2.selectbox("✈️ Hosté", teams, index=1)
-h_norm, a_norm = normalize_name(h_team), normalize_name(a_team)
-
-# KONTEXT (Elo)
-h_e, a_e = db_elo.get(h_norm, 1500), db_elo.get(a_norm, 1500)
-st.caption(f"Síla týmů (Elo): {h_team} ({int(h_e)}) vs {a_team} ({int(a_e)})")
-st.divider()
-
-# VSTUPY (Momentum odstraněno z očí uživatele)
-col_min, col_score, col_stats = st.columns([1, 1.5, 2.5])
-with col_min:
-    minute = st.number_input("Minuta", 0, 90, 0)
-with col_score:
-    s_h = st.number_input(f"Góly {h_team}", 0, 10, 0)
-    s_a = st.number_input(f"Góly {a_team}", 0, 10, 0)
-with col_stats:
-    c_x1, c_x2 = st.columns(2)
-    xg_h = c_x1.number_input(f"xG {h_team}", 0.0, 10.0, 0.0, step=0.01)
-    xg_a = c_x2.number_input(f"xG {a_team}", 0.0, 10.0, 0.0, step=0.01)
+# 1. SETUP ZÁPASU (Sidebar pro čistší vzhled)
+with st.sidebar:
+    st.header("⚙️ Nastavení Zápasu")
+    h_team = st.selectbox("Domácí", teams, index=0)
+    a_team = st.selectbox("Hosté", teams, index=1)
     
-    c_sh1, c_sh2 = st.columns(2)
-    sh_h = c_sh1.number_input(f"Střely {h_team}", 0, 40, 0)
-    sh_a = c_sh2.number_input(f"Střely {a_team}", 0, 40, 0)
-
-# VÝPOČET
-if st.button("🔮 ANALYZOVAT ZÁPAS", type="primary", use_container_width=True):
-    prof = db_profiles.get(h_norm, {'avg_xg': 1.3, 'ppda': 10, 'deep': 6})
+    h_norm, a_norm = normalize_name(h_team), normalize_name(a_team)
+    h_e, a_e = db_elo.get(h_norm, 1500), db_elo.get(a_norm, 1500)
     f_h = db_fifa.get(h_norm, {'attack': 75, 'defence': 75, 'overall': 75})
     f_a = db_fifa.get(a_norm, {'attack': 75, 'defence': 75, 'overall': 75})
+
+    st.divider()
+    st.info(f"**Elo Strength:**\n{h_team}: {int(h_e)}\n{a_team}: {int(a_e)}")
+
+# 2. SCOREBOARD HEADER
+col_min, col_sc, col_stats = st.columns([1, 4, 1])
+
+# Vstupy (Umístíme je trochu elegantněji)
+st.markdown("### 📝 Live Statistiky")
+r1_c1, r1_c2, r1_c3 = st.columns([1, 1, 1])
+with r1_c1:
+    minute = st.number_input("⏱ Minuta", 0, 90, 45)
+with r1_c2:
+    s_h = st.number_input(f"Góly {h_team}", 0, 10, 0)
+with r1_c3:
+    s_a = st.number_input(f"Góly {a_team}", 0, 10, 0)
+
+r2_c1, r2_c2, r2_c3, r2_c4 = st.columns(4)
+with r2_c1: xg_h = st.number_input(f"xG {h_team}", 0.0, 10.0, 0.0, step=0.01)
+with r2_c2: sh_h = st.number_input(f"Střely {h_team}", 0, 40, 0)
+with r2_c3: xg_a = st.number_input(f"xG {a_team}", 0.0, 10.0, 0.0, step=0.01)
+with r2_c4: sh_a = st.number_input(f"Střely {a_team}", 0, 40, 0)
+
+# Vizuální Scoreboard
+st.markdown(f"""
+<div class="score-board">
+    <div class="meta-info">LIVE PREDICTION ENGINE • {minute}' MIN</div>
+    <div>
+        <span class="team-name">{h_team}</span>
+        <span class="score">{s_h} - {s_a}</span>
+        <span class="team-name">{a_team}</span>
+    </div>
+    <div class="meta-info">xG: {xg_h} - {xg_a}</div>
+</div>
+""", unsafe_allow_html=True)
+
+
+# --- VÝPOČET A PŘEDPOVĚĎ ---
+if st.button("🚀 ANALYZOVAT A PŘEDPOVĚDĚT", type="primary", use_container_width=True):
     
+    # 1. Příprava dat
+    prof = db_profiles.get(h_norm, {'avg_xg': 1.3, 'ppda': 10, 'deep': 6})
     input_data = {
         'minute': minute, 'time_remaining': 90-minute,
         'score_home': s_h, 'score_away': s_a, 'goal_diff': s_h-s_a,
@@ -149,13 +200,7 @@ if st.button("🔮 ANALYZOVAT ZÁPAS", type="primary", use_container_width=True)
         'shots_home': sh_h, 'shots_away': sh_a,
         'efficiency_h': s_h-xg_h, 'efficiency_a': s_a-xg_a,
         'avg_shot_qual_h': (xg_h/sh_h) if sh_h>0 else 0,
-        
-        # --- HACK PRO STARÝ MODEL ---
-        # Posíláme nuly, aby model nespadl, i když to uživatel nevidí
-        'momentum_xg_h': 0.0,
-        'momentum_pressure_h': 0.0,
-        # ----------------------------
-        
+        'momentum_xg_h': 0.0, 'momentum_pressure_h': 0.0, # HACK
         'elo_home': h_e, 'elo_diff': h_e-a_e,
         'fifa_att_diff': int(f_h['attack'])-int(f_a['attack']),
         'fifa_def_diff': int(f_h['defence'])-int(f_a['defence']),
@@ -163,70 +208,82 @@ if st.button("🔮 ANALYZOVAT ZÁPAS", type="primary", use_container_width=True)
         'profile_avg_xg_h': prof['avg_xg'], 'profile_ppda_h': prof['ppda'], 'profile_deep_h': prof['deep']
     }
     
-    # Seřazení sloupců a predikce
     df_in = pd.DataFrame([input_data])
     try:
-        df_in = df_in[feat_names]
-        pred_total = model.predict(df_in)[0]
-    except KeyError as e:
-        st.error(f"Chyba modelu (chybí feature): {e}")
+        pred_total = model.predict(df_in[feat_names])[0]
+    except:
+        st.error("Chyba modelu.")
         st.stop()
-    
-    # VIZUALIZACE VÝSLEDKŮ (Nový Dashboard Design)
-    curr_total = s_h + s_a
-    expected_more = max(0, pred_total - curr_total)
-    
-    st.markdown("---")
-    
-    col_res1, col_res2 = st.columns([1, 1.5])
-    
-    with col_res1:
-        st.subheader("🏁 Finální Total")
-        # Velké zelené číslo
-        st.markdown(f"<h1 style='text-align: center; color: #4CAF50; font-size: 60px;'>{pred_total:.2f}</h1>", unsafe_allow_html=True)
-        
-        # Slovní interpretace
-        if expected_more > 1.5:
-            st.warning(f"🔥 Očekávám ještě cca 2 góly!")
-        elif expected_more > 0.6:
-            st.info(f"⚡ Ještě jeden gól by měl padnout.")
-        else:
-            st.success("❄️ Zápas už se spíše dohraje.")
-            
-    with col_res2:
-        st.subheader("📊 Průběh gólů")
-        
-        # Sloupcový graf (Stacked Bar Chart)
-        fig = go.Figure()
-        
-        # Co už padlo (Šedá)
-        fig.add_trace(go.Bar(
-            y=['Góly'], x=[curr_total], name='Aktuální stav',
-            orientation='h', marker=dict(color='#CFD8DC', line=dict(width=0))
-        ))
-        
-        # Co se čeká (Zelená)
-        fig.add_trace(go.Bar(
-            y=['Góly'], x=[expected_more], name='Očekávaný přídavek',
-            orientation='h', marker=dict(color='#4CAF50', line=dict(width=0)),
-            text=[f"+{expected_more:.2f}"], textposition='auto'
-        ))
-        
-        fig.update_layout(
-            barmode='stack', 
-            height=150, 
-            margin=dict(l=20, r=20, t=20, b=20),
-            xaxis=dict(range=[0, max(5, int(pred_total)+2)], showgrid=False, title="Počet gólů"),
-            yaxis=dict(showticklabels=False),
-            showlegend=True,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-        st.plotly_chart(fig, use_container_width=True)
 
-    # Efektivita (Bonus)
-    with st.expander("🔍 Detail: Efektivita a štěstí"):
-        ce1, ce2 = st.columns(2)
+    # 2. Probability Engine (Poisson)
+    current_goals = s_h + s_a
+    over_probs, expected_more = calculate_probs(pred_total, current_goals)
+
+    # --- DASHBOARD VÝSLEDKŮ ---
+    
+    # A. HLAVNÍ KARTY
+    c_res1, c_res2, c_res3 = st.columns([1.2, 1, 1])
+    
+    with c_res1:
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.caption("🏁 PŘEDPOKLÁDANÝ TOTAL")
+        st.markdown(f"<h1 style='color: #2196F3; margin:0;'>{pred_total:.2f}</h1>", unsafe_allow_html=True)
+        st.write(f"Model očekává ještě **{expected_more:.2f}** gólů.")
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+    with c_res2:
+        # SÁZKOVÉ ŠANCE
+        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+        st.caption("🎲 SÁZKOVÉ ŠANCE")
+        
+        # Klíčová sázka (Nejbližší Over)
+        next_line = int(current_goals)
+        key_prob = over_probs.get(f"Over {next_line + 0.5}", 0) * 100
+        
+        st.metric(f"OVER {next_line}.5", f"{key_prob:.1f} %")
+        st.progress(int(key_prob))
+        
+        # Vyšší line
+        higher_line_prob = over_probs.get(f"Over {next_line + 1.5}", 0) * 100
+        if higher_line_prob > 30:
+            st.caption(f"Šance na Over {next_line + 1}.5: **{higher_line_prob:.1f} %**")
+            
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with c_res3:
+         # ATTACK PERFORMANCE
         eff_h = s_h - xg_h
         eff_a = s_a - xg_a
-        ce1.metric(f"{h_team}", f"{eff_h:+.2f}", help="Kladné = Tým dává víc gólů než by měl (Skill/Štěstí). Záporné = Spaluje šance.")
-        ce2.metric(f"{a_team}", f"{eff_a:+.2f}")
+        
+        fig_bar = go.Figure()
+        fig_bar.add_trace(go.Bar(
+            x=[eff_h, eff_a], y=[h_team, a_team], orientation='h',
+            marker=dict(color=['#66BB6A' if eff_h>=0 else '#EF5350', '#66BB6A' if eff_a>=0 else '#EF5350'])
+        ))
+        fig_bar.update_layout(title="Efektivita (Goals vs xG)", height=150, margin=dict(l=10, r=10, t=30, b=20), xaxis=dict(range=[-2, 2]))
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    # B. VISUAL GOAL PROGRESS
+    st.write("---")
+    st.subheader("📊 Goal Timeline Prediction")
+    
+    fig = go.Figure()
+    # Šedá zóna (Co už padlo)
+    fig.add_trace(go.Bar(
+        y=['Zápas'], x=[current_goals], name='Aktuální stav', orientation='h',
+        marker=dict(color='#CFD8DC', line=dict(width=0))
+    ))
+    # Barevná zóna (Co se čeká)
+    color_pred = '#4CAF50' if expected_more > 0.5 else '#FF9800'
+    fig.add_trace(go.Bar(
+        y=['Zápas'], x=[expected_more], name='Očekávaný přídavek', orientation='h',
+        marker=dict(color=color_pred, line=dict(width=0)),
+        text=[f"+{expected_more:.2f}"], textposition='auto'
+    ))
+    
+    fig.update_layout(
+        barmode='stack', height=100, margin=dict(l=0, r=0, t=0, b=0),
+        xaxis=dict(range=[0, max(4, int(pred_total)+1)], showgrid=True),
+        yaxis=dict(showticklabels=False), showlegend=False
+    )
+    st.plotly_chart(fig, use_container_width=True)
