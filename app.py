@@ -9,7 +9,6 @@ import json
 import os
 
 # --- KONFIGURACE SOUBORŮ ---
-# Používáme .ubj (binární formát), který jsi nahrál na GitHub
 MODEL_FILENAME = "ultimate_goals_model.ubj"
 FEATURES_FILENAME = "model_features.pkl"
 METADATA_FILENAME = "model_metadata.json"
@@ -29,6 +28,7 @@ st.markdown("""
     .team-name { font-size: 26px; font-weight: bold; color: #FFFFFF; }
     .score-digit { font-size: 50px; font-weight: 900; color: #4CAF50; margin: 0 15px; }
     .metric-card { background: #f8f9fa; padding: 20px; border-radius: 12px; border-left: 6px solid #1E88E5; box-shadow: 2px 2px 10px rgba(0,0,0,0.05); }
+    .bet-row { padding: 10px; border-bottom: 1px solid #eee; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -59,40 +59,49 @@ def normalize_name(name):
     return mapping.get(name, name)
 
 def calculate_probs(predicted_total, current_goals):
+    """Vypočítá pravděpodobnosti pro Over i Under."""
     def poisson(k, lamb): return (lamb**k * math.exp(-lamb)) / math.factorial(k)
+    
+    # Lambda je očekávaný počet ZBÝVAJÍCÍCH gólů
     lamb = max(0.01, predicted_total - current_goals)
+    
+    # Pravděpodobnost pro přesně 0, 1, 2... dalších gólů
     probs = {i: poisson(i, lamb) for i in range(7)}
+    
+    # Over: Šance, že padne více než X gólů
     over_probs = {
         f"Over {current_goals + 0.5}": 1.0 - probs[0],
         f"Over {current_goals + 1.5}": 1.0 - (probs[0] + probs[1]),
         f"Over {current_goals + 2.5}": 1.0 - (probs[0] + probs[1] + probs[2])
     }
-    return over_probs, lamb
+    
+    # Under: Šance, že padne méně než X gólů
+    under_probs = {
+        f"Under {current_goals + 0.5}": probs[0],                # Padne 0 dalších
+        f"Under {current_goals + 1.5}": probs[0] + probs[1],     # Padne 0 nebo 1 další
+        f"Under {current_goals + 2.5}": probs[0] + probs[1] + probs[2] # Padne 0, 1 nebo 2 další
+    }
+    
+    return over_probs, under_probs, lamb
 
-# --- 🛠️ HLAVNÍ FIX: NAČÍTÁNÍ MODELU ---
+# --- HLAVNÍ FIX: NAČÍTÁNÍ MODELU ---
 @st.cache_resource
 def load_model_assets():
     try:
-        # Získáme absolutní cestu k adresáři, kde leží tento skript (app.py)
-        # To zajistí, že Streamlit ví přesně, kde hledat, i když běží v jiném kontextu.
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        
         path_model = os.path.join(current_dir, MODEL_FILENAME)
         path_features = os.path.join(current_dir, FEATURES_FILENAME)
 
-        # Kontrola, jestli soubor existuje
         if not os.path.exists(path_model):
-            st.error(f"❌ CHYBA: Soubor modelu nebyl nalezen na cestě: {path_model}")
-            st.write("Obsah složky:", os.listdir(current_dir)) # Debug výpis
+            st.error(f"❌ CHYBA: Soubor modelu nebyl nalezen: {path_model}")
             return None, None
 
         m = xgb.XGBRegressor()
         m.load_model(path_model)
         f = joblib.load(path_features)
-        
         return m, f
     except Exception as e:
-        st.error(f"❌ Chyba při načítání XGBoost modelu: {e}")
+        st.error(f"❌ Chyba při načítání modelu: {e}")
         return None, None
 
 @st.cache_data
@@ -113,7 +122,6 @@ def load_static_data():
         stats['norm_h'] = stats['home_team'].apply(normalize_name)
         stats['norm_a'] = stats['away_team'].apply(normalize_name)
         
-        # Výpočet Home/Away profilů
         profiles = {}
         all_teams = set(stats['norm_h'].unique()) | set(stats['norm_a'].unique())
         
@@ -129,13 +137,12 @@ def load_static_data():
         
         elo['norm_team'] = elo['team'].apply(normalize_name)
         elo_map = elo.sort_values('valid_from').groupby('norm_team').tail(1).set_index('norm_team')['elo'].to_dict()
-        
         fifa['norm_team'] = fifa['team'].apply(normalize_name)
         fifa_map = fifa.set_index('norm_team')[['attack', 'defence', 'overall']].to_dict('index')
         
         return sorted(list(all_teams)), elo_map, fifa_map, profiles
     except Exception as e:
-        st.warning(f"⚠️ Chyba při načítání CSV dat: {e}")
+        st.warning(f"⚠️ Chyba při načítání dat: {e}")
         return [], {}, {}, {}
 
 # --- INITIALIZACE ---
@@ -150,7 +157,7 @@ col_t1, col_t2 = st.columns(2)
 h_team = col_t1.selectbox("🏠 Domácí Tým", teams, index=0)
 a_team = col_t2.selectbox("✈️ Hostující Tým", teams, index=1)
 
-# 2. Manuální zadání statistik
+# 2. Manuální zadání
 st.markdown("### 📝 Zadej aktuální stav")
 with st.container():
     c1, c2, c3 = st.columns(3)
@@ -164,7 +171,7 @@ with st.container():
     xg_a = c6.number_input(f"xG {a_team}", 0.0, 10.0, 0.0, step=0.01)
     shots_a = c7.number_input(f"Střely {a_team}", 0, 50, 0)
 
-# 3. Scoreboard (Vizuální kontrola)
+# 3. Scoreboard
 st.markdown(f"""
 <div class="score-board">
     <span class="team-name">{h_team}</span>
@@ -179,30 +186,22 @@ st.markdown(f"""
 # --- VÝPOČET ---
 if st.button("🚀 VYPOČÍTAT PREDIKCI", type="primary", use_container_width=True):
     if model and feat_names:
-        # Příprava dat
         h_n, a_n = normalize_name(h_team), normalize_name(a_team)
         
-        # Načtení kontextu (Elo, FIFA, Profily)
+        # Načtení dat
         eh = db_elo.get(h_n, 1500)
         ea = db_elo.get(a_n, 1500)
-        
         fh = db_fifa.get(h_n, {'attack':75, 'defence':75, 'overall':75})
         fa = db_fifa.get(a_n, {'attack':75, 'defence':75, 'overall':75})
-        
         ph = db_profiles.get(h_n, {'h_att': 1.4, 'h_def': 1.2, 'a_att': 1.1, 'a_def': 1.5})
         pa = db_profiles.get(a_n, {'h_att': 1.4, 'h_def': 1.2, 'a_att': 1.1, 'a_def': 1.5})
         
-        # Sestavení vstupního vektoru
         input_data = {
-            'minute': minute,
-            'time_remaining': 90 - minute,
-            'score_home': score_h,
-            'score_away': score_a,
-            'goal_diff': score_h - score_a,
-            'current_total_goals': score_h + score_a,
+            'minute': minute, 'time_remaining': 90 - minute,
+            'score_home': score_h, 'score_away': score_a,
+            'goal_diff': score_h - score_a, 'current_total_goals': score_h + score_a,
             'is_draw': 1 if score_h == score_a else 0,
-            'xg_home': xg_h, 'xg_away': xg_a,
-            'xg_total': xg_h + xg_a, 'xg_diff': xg_h - xg_a,
+            'xg_home': xg_h, 'xg_away': xg_a, 'xg_total': xg_h + xg_a, 'xg_diff': xg_h - xg_a,
             'shots_home': shots_h, 'shots_away': shots_a,
             'efficiency_h': score_h - xg_h, 'efficiency_a': score_a - xg_a,
             'avg_shot_qual_h': (xg_h / shots_h) if shots_h > 0 else 0,
@@ -210,8 +209,6 @@ if st.button("🚀 VYPOČÍTAT PREDIKCI", type="primary", use_container_width=Tr
             'fifa_att_diff': int(fh['attack']) - int(fa['attack']),
             'fifa_def_diff': int(fh['defence']) - int(fa['defence']),
             'squad_qual_diff': int(fh['overall']) - int(fa['overall']),
-            
-            # Profily
             'home_team_home_att': ph['h_att'], 'home_team_home_def': ph['h_def'],
             'away_team_away_att': pa['a_att'], 'away_team_away_def': pa['a_def']
         }
@@ -219,69 +216,71 @@ if st.button("🚀 VYPOČÍTAT PREDIKCI", type="primary", use_container_width=Tr
         df_in = pd.DataFrame([input_data])
         
         try:
-            # Seřazení sloupců podle modelu
             df_in = df_in[feat_names]
-            
-            # Predikce
             pred_total = model.predict(df_in)[0]
-            over_probs, expected_more = calculate_probs(pred_total, score_h + score_a)
             
-            # --- VÝSLEDKY ---
+            # Získání Over i Under
+            over_probs, under_probs, expected_more = calculate_probs(pred_total, score_h + score_a)
+            
+            # --- VIZUALIZACE ---
             st.divider()
-            c_res1, c_res2 = st.columns([1, 1.5])
+            c_res1, c_res2 = st.columns([1, 1.3])
             
             with c_res1:
                 st.markdown('<div class="metric-card">', unsafe_allow_html=True)
                 st.subheader("Očekávaný Total")
                 st.title(f"{pred_total:.2f}")
-                st.write(f"Model čeká ještě: **{expected_more:.2f}** gólů")
+                st.write(f"Zbývá gólů: **{expected_more:.2f}**")
                 st.markdown('</div>', unsafe_allow_html=True)
-                
-                st.write("")
-                st.markdown("#### Pravděpodobnosti (Sázky)")
-                for line, prob in over_probs.items():
-                    col_p1, col_p2 = st.columns([1, 3])
-                    col_p1.markdown(f"**{line}**")
-                    col_p2.progress(int(prob*100))
-                    st.caption(f"{prob*100:.1f}%")
-
+            
             with c_res2:
-                fig = go.Figure(go.Indicator(
-                    mode = "gauge+number", 
-                    value = pred_total, 
-                    title = {'text': "Síla predikce gólů"},
-                    gauge = {
-                        'axis': {'range': [0, 6]}, 
-                        'bar': {'color': "#1E88E5"},
-                        'steps': [{'range': [0, 2.5], 'color': "#eeeeee"}, {'range': [2.5, 5], 'color': "#cccccc"}]
-                    }
-                ))
-                fig.update_layout(height=350, margin=dict(l=20, r=20, t=50, b=20))
-                st.plotly_chart(fig, use_container_width=True)
+                st.markdown("#### 🎲 Sázkové Příležitosti (O/U)")
+                
+                # Tabulka Over / Under
+                current_g = score_h + score_a
+                lines = [current_g + 0.5, current_g + 1.5, current_g + 2.5]
+                
+                for line in lines:
+                    o_key = f"Over {line}"
+                    u_key = f"Under {line}"
+                    
+                    o_val = over_probs.get(o_key, 0)
+                    u_val = under_probs.get(u_key, 0)
+                    
+                    # Layout pro řádek
+                    row_c1, row_c2, row_c3 = st.columns([1, 1, 1.2])
+                    
+                    # Zvýraznění vyšší pravděpodobnosti
+                    color_o = "green" if o_val > 0.5 else "grey"
+                    color_u = "green" if u_val > 0.5 else "grey"
+                    
+                    row_c1.markdown(f"**⬆️ Over {line}**")
+                    row_c1.write(f":{color_o}[{o_val*100:.1f}%]")
+                    
+                    row_c2.markdown(f"**⬇️ Under {line}**")
+                    row_c2.write(f":{color_u}[{u_val*100:.1f}%]")
+                    
+                    # Vizuální progress bar (poměr sil)
+                    row_c3.write("") # Spacer
+                    row_c3.progress(int(o_val*100))
 
         except KeyError as e:
             st.error(f"⚠️ Chyba ve struktuře dat: {e}")
-            st.write("Aplikace posílá:", list(df_in.columns))
-            st.write("Model očekává:", feat_names)
     else:
-        st.error("Model není načten. Podívej se na chybu výše.")
+        st.error("Model není načten.")
 
-# --- FOOTER METADATA ---
+# --- FOOTER ---
 st.write("")
 with st.expander("ℹ️ Informace o modelu"):
     current_dir = os.path.dirname(os.path.abspath(__file__))
     path_meta = os.path.join(current_dir, METADATA_FILENAME)
-    
     if os.path.exists(path_meta):
         try:
-            with open(path_meta, "r") as f:
-                meta = json.load(f)
+            with open(path_meta, "r") as f: meta = json.load(f)
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Chyba (MAE)", meta.get('mae_score', 'N/A'))
             m2.metric("Trénováno na", f"{meta.get('training_rows_snapshots', 0)//90} zápasech")
             m3.metric("Snapshot interval", "1 min")
             m4.metric("Poslední update", meta.get('training_date', 'N/A'))
-        except:
-            st.text("Metadata nelze přečíst.")
-    else:
-        st.info("Metadata nejsou k dispozici.")
+        except: st.text("Metadata nelze přečíst.")
+    else: st.info("Metadata nejsou k dispozici.")
