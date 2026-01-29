@@ -7,8 +7,12 @@ import plotly.graph_objects as go
 import math
 import json
 import os
+import zipfile  # <--- Klíčová knihovna pro opravu chyby
 
-MODEL_FILENAME = "game_model.ubj"  # <--- Nový název
+# --- KONFIGURACE SOUBORŮ ---
+# Aplikace bude hledat ZIP. Pokud v něm najde model, použije ho.
+MODEL_ARCHIVE = "game_model.zip" 
+MODEL_FILENAME = "game_model.ubj" # Název souboru uvnitř ZIPu
 FEATURES_FILENAME = "model_features.pkl"
 METADATA_FILENAME = "model_metadata.json"
 
@@ -27,12 +31,10 @@ st.markdown("""
     .team-name { font-size: 26px; font-weight: bold; color: #FFFFFF; }
     .score-digit { font-size: 50px; font-weight: 900; color: #4CAF50; margin: 0 15px; }
     .metric-card { background: #f8f9fa; padding: 20px; border-radius: 12px; border-left: 6px solid #1E88E5; box-shadow: 2px 2px 10px rgba(0,0,0,0.05); }
-    .bet-row { padding: 10px; border-bottom: 1px solid #eee; }
 </style>
 """, unsafe_allow_html=True)
 
 # --- POMOCNÉ FUNKCE ---
-
 def normalize_name(name):
     if name is None: return ""
     name = str(name).lower().strip()
@@ -58,49 +60,54 @@ def normalize_name(name):
     return mapping.get(name, name)
 
 def calculate_probs(predicted_total, current_goals):
-    """Vypočítá pravděpodobnosti pro Over i Under."""
     def poisson(k, lamb): return (lamb**k * math.exp(-lamb)) / math.factorial(k)
-    
-    # Lambda je očekávaný počet ZBÝVAJÍCÍCH gólů
     lamb = max(0.01, predicted_total - current_goals)
-    
-    # Pravděpodobnost pro přesně 0, 1, 2... dalších gólů
     probs = {i: poisson(i, lamb) for i in range(7)}
     
-    # Over: Šance, že padne více než X gólů
     over_probs = {
         f"Over {current_goals + 0.5}": 1.0 - probs[0],
         f"Over {current_goals + 1.5}": 1.0 - (probs[0] + probs[1]),
         f"Over {current_goals + 2.5}": 1.0 - (probs[0] + probs[1] + probs[2])
     }
-    
-    # Under: Šance, že padne méně než X gólů
     under_probs = {
-        f"Under {current_goals + 0.5}": probs[0],                # Padne 0 dalších
-        f"Under {current_goals + 1.5}": probs[0] + probs[1],     # Padne 0 nebo 1 další
-        f"Under {current_goals + 2.5}": probs[0] + probs[1] + probs[2] # Padne 0, 1 nebo 2 další
+        f"Under {current_goals + 0.5}": probs[0],
+        f"Under {current_goals + 1.5}": probs[0] + probs[1],
+        f"Under {current_goals + 2.5}": probs[0] + probs[1] + probs[2]
     }
-    
     return over_probs, under_probs, lamb
 
-# --- HLAVNÍ FIX: NAČÍTÁNÍ MODELU ---
+# --- 🛡️ ROBUSTNÍ NAČÍTÁNÍ SE ZIPEM ---
 @st.cache_resource
 def load_model_assets():
     try:
+        # 1. Získání absolutní cesty
         current_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        path_archive = os.path.join(current_dir, MODEL_ARCHIVE)
         path_model = os.path.join(current_dir, MODEL_FILENAME)
         path_features = os.path.join(current_dir, FEATURES_FILENAME)
 
+        # 2. Logika rozbalování ZIPu
+        # Pokud model neexistuje, zkusíme ho vytáhnout ze ZIPu
         if not os.path.exists(path_model):
-            st.error(f"❌ CHYBA: Soubor modelu nebyl nalezen: {path_model}")
-            return None, None
+            if os.path.exists(path_archive):
+                # st.info("📦 Rozbaluji model ze ZIP archivu...") # (Volitelné info pro uživatele)
+                with zipfile.ZipFile(path_archive, 'r') as zip_ref:
+                    zip_ref.extractall(current_dir)
+            else:
+                # Pokud není ani model, ani zip -> Konec
+                st.error(f"❌ CHYBA: Nenalezen soubor modelu ({MODEL_FILENAME}) ani archiv ({MODEL_ARCHIVE}).")
+                st.write("Obsah složky:", os.listdir(current_dir))
+                return None, None
 
+        # 3. Načtení modelu (teď už musí existovat)
         m = xgb.XGBRegressor()
         m.load_model(path_model)
         f = joblib.load(path_features)
+        
         return m, f
     except Exception as e:
-        st.error(f"❌ Chyba při načítání modelu: {e}")
+        st.error(f"❌ Kritická chyba při načítání modelu: {e}")
         return None, None
 
 @st.cache_data
@@ -246,10 +253,8 @@ if st.button("🚀 VYPOČÍTAT PREDIKCI", type="primary", use_container_width=Tr
                     o_val = over_probs.get(o_key, 0)
                     u_val = under_probs.get(u_key, 0)
                     
-                    # Layout pro řádek
                     row_c1, row_c2, row_c3 = st.columns([1, 1, 1.2])
                     
-                    # Zvýraznění vyšší pravděpodobnosti
                     color_o = "green" if o_val > 0.5 else "grey"
                     color_u = "green" if u_val > 0.5 else "grey"
                     
@@ -259,14 +264,13 @@ if st.button("🚀 VYPOČÍTAT PREDIKCI", type="primary", use_container_width=Tr
                     row_c2.markdown(f"**⬇️ Under {line}**")
                     row_c2.write(f":{color_u}[{u_val*100:.1f}%]")
                     
-                    # Vizuální progress bar (poměr sil)
-                    row_c3.write("") # Spacer
+                    row_c3.write("") 
                     row_c3.progress(int(o_val*100))
 
         except KeyError as e:
             st.error(f"⚠️ Chyba ve struktuře dat: {e}")
     else:
-        st.error("Model není načten.")
+        st.error("Model není načten (zkontroluj ZIP na GitHubu).")
 
 # --- FOOTER ---
 st.write("")
