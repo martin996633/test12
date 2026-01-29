@@ -7,16 +7,16 @@ import plotly.graph_objects as go
 import math
 import json
 import os
-import zipfile  # <--- Klíčová knihovna pro opravu chyby
+import zipfile  # <--- Klíčová knihovna pro práci se ZIPem
 
 # --- KONFIGURACE SOUBORŮ ---
-# Aplikace bude hledat ZIP. Pokud v něm najde model, použije ho.
+# Aplikace hledá ZIP archiv. Pokud v něm najde model, použije ho.
 MODEL_ARCHIVE = "game_model.zip" 
 MODEL_FILENAME = "game_model.ubj" # Název souboru uvnitř ZIPu
 FEATURES_FILENAME = "model_features.pkl"
 METADATA_FILENAME = "model_metadata.json"
 
-# CSV data
+# CSV data (Statistiky, Elo, FIFA)
 STATS_CSV = "data_stats.csv"
 ELO_CSV = "data_elo.csv"
 FIFA_CSV = "data_fifa.csv"
@@ -31,6 +31,7 @@ st.markdown("""
     .team-name { font-size: 26px; font-weight: bold; color: #FFFFFF; }
     .score-digit { font-size: 50px; font-weight: 900; color: #4CAF50; margin: 0 15px; }
     .metric-card { background: #f8f9fa; padding: 20px; border-radius: 12px; border-left: 6px solid #1E88E5; box-shadow: 2px 2px 10px rgba(0,0,0,0.05); }
+    .debug-box { background-color: #ffebee; padding: 10px; border-radius: 5px; border: 1px solid #ffcdd2; color: #c62828; margin-bottom: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -88,19 +89,17 @@ def load_model_assets():
         path_features = os.path.join(current_dir, FEATURES_FILENAME)
 
         # 2. Logika rozbalování ZIPu
-        # Pokud model neexistuje, zkusíme ho vytáhnout ze ZIPu
         if not os.path.exists(path_model):
             if os.path.exists(path_archive):
-                # st.info("📦 Rozbaluji model ze ZIP archivu...") # (Volitelné info pro uživatele)
+                # Rozbalíme ZIP
                 with zipfile.ZipFile(path_archive, 'r') as zip_ref:
                     zip_ref.extractall(current_dir)
             else:
-                # Pokud není ani model, ani zip -> Konec
                 st.error(f"❌ CHYBA: Nenalezen soubor modelu ({MODEL_FILENAME}) ani archiv ({MODEL_ARCHIVE}).")
-                st.write("Obsah složky:", os.listdir(current_dir))
+                st.write("Obsah složky na serveru:", os.listdir(current_dir))
                 return None, None
 
-        # 3. Načtení modelu (teď už musí existovat)
+        # 3. Načtení modelu
         m = xgb.XGBRegressor()
         m.load_model(path_model)
         f = joblib.load(path_features)
@@ -158,12 +157,10 @@ teams, db_elo, db_fifa, db_profiles = load_static_data()
 # --- HLAVNÍ UI ---
 st.markdown('<div class="main-header">🤖 AI Goals Calculator</div>', unsafe_allow_html=True)
 
-# 1. Výběr týmů
 col_t1, col_t2 = st.columns(2)
 h_team = col_t1.selectbox("🏠 Domácí Tým", teams, index=0)
 a_team = col_t2.selectbox("✈️ Hostující Tým", teams, index=1)
 
-# 2. Manuální zadání
 st.markdown("### 📝 Zadej aktuální stav")
 with st.container():
     c1, c2, c3 = st.columns(3)
@@ -177,7 +174,6 @@ with st.container():
     xg_a = c6.number_input(f"xG {a_team}", 0.0, 10.0, 0.0, step=0.01)
     shots_a = c7.number_input(f"Střely {a_team}", 0, 50, 0)
 
-# 3. Scoreboard
 st.markdown(f"""
 <div class="score-board">
     <span class="team-name">{h_team}</span>
@@ -194,7 +190,7 @@ if st.button("🚀 VYPOČÍTAT PREDIKCI", type="primary", use_container_width=Tr
     if model and feat_names:
         h_n, a_n = normalize_name(h_team), normalize_name(a_team)
         
-        # Načtení dat
+        # Načtení dat (s ošetřením chybějících hodnot)
         eh = db_elo.get(h_n, 1500)
         ea = db_elo.get(a_n, 1500)
         fh = db_fifa.get(h_n, {'attack':75, 'defence':75, 'overall':75})
@@ -223,12 +219,22 @@ if st.button("🚀 VYPOČÍTAT PREDIKCI", type="primary", use_container_width=Tr
         
         try:
             df_in = df_in[feat_names]
-            pred_total = model.predict(df_in)[0]
             
-            # Získání Over i Under
+            # --- 🕵️ DEBUG SEKCE: PROČ JSOU VÝSLEDKY DIVNÉ? ---
+            with st.expander("🕵️ Rentgen Dat (Proč to vyšlo takhle?)"):
+                st.warning("Zkontroluj, zda hodnoty níže odpovídají realitě. Pokud vidíš '1.4' u útoku silného týmu, chybí data v CSV.")
+                
+                d_c1, d_c2, d_c3 = st.columns(3)
+                d_c1.metric("Elo Rozdíl", f"{input_data['elo_diff']:.0f}", help="Kladné = Domácí je favorit")
+                d_c2.metric(f"Útok {h_team}", f"{input_data['home_team_home_att']:.2f}", help="Průměr xG doma (Default 1.4)")
+                d_c3.metric(f"Obrana {a_team}", f"{input_data['away_team_away_def']:.2f}", help="Průměr xG proti venku (Default 1.5)")
+                
+                st.dataframe(df_in.T.style.format("{:.3f}"))
+            # -----------------------------------------------------
+
+            pred_total = model.predict(df_in)[0]
             over_probs, under_probs, expected_more = calculate_probs(pred_total, score_h + score_a)
             
-            # --- VIZUALIZACE ---
             st.divider()
             c_res1, c_res2 = st.columns([1, 1.3])
             
@@ -241,29 +247,21 @@ if st.button("🚀 VYPOČÍTAT PREDIKCI", type="primary", use_container_width=Tr
             
             with c_res2:
                 st.markdown("#### 🎲 Sázkové Příležitosti (O/U)")
-                
-                # Tabulka Over / Under
                 current_g = score_h + score_a
                 lines = [current_g + 0.5, current_g + 1.5, current_g + 2.5]
                 
                 for line in lines:
-                    o_key = f"Over {line}"
-                    u_key = f"Under {line}"
-                    
-                    o_val = over_probs.get(o_key, 0)
-                    u_val = under_probs.get(u_key, 0)
+                    o_val = over_probs.get(f"Over {line}", 0)
+                    u_val = under_probs.get(f"Under {line}", 0)
                     
                     row_c1, row_c2, row_c3 = st.columns([1, 1, 1.2])
-                    
                     color_o = "green" if o_val > 0.5 else "grey"
                     color_u = "green" if u_val > 0.5 else "grey"
                     
                     row_c1.markdown(f"**⬆️ Over {line}**")
                     row_c1.write(f":{color_o}[{o_val*100:.1f}%]")
-                    
                     row_c2.markdown(f"**⬇️ Under {line}**")
                     row_c2.write(f":{color_u}[{u_val*100:.1f}%]")
-                    
                     row_c3.write("") 
                     row_c3.progress(int(o_val*100))
 
@@ -272,7 +270,6 @@ if st.button("🚀 VYPOČÍTAT PREDIKCI", type="primary", use_container_width=Tr
     else:
         st.error("Model není načten (zkontroluj ZIP na GitHubu).")
 
-# --- FOOTER ---
 st.write("")
 with st.expander("ℹ️ Informace o modelu"):
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -282,7 +279,7 @@ with st.expander("ℹ️ Informace o modelu"):
             with open(path_meta, "r") as f: meta = json.load(f)
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Chyba (MAE)", meta.get('mae_score', 'N/A'))
-            m2.metric("Trénováno na", f"{meta.get('training_rows_snapshots', 0)//90} zápasech")
+            m2.metric("Zápasů v tréninku", f"{meta.get('training_rows_snapshots', 0)//90}")
             m3.metric("Snapshot interval", "1 min")
             m4.metric("Poslední update", meta.get('training_date', 'N/A'))
         except: st.text("Metadata nelze přečíst.")
