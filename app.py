@@ -5,29 +5,40 @@ import xgboost as xgb
 import joblib
 import plotly.graph_objects as go
 import math
+import requests
+import json
+from datetime import datetime
+
+# Import live dat (pokud soubor existuje)
+try:
+    from fotmob import get_live_matches, get_match_details
+except ImportError:
+    def get_live_matches(): return []
+    def get_match_details(id): return {}
 
 # --- KONFIGURACE ---
 MODEL_FILE = "ultimate_goals_model.json"
 FEATURES_FILE = "model_features.pkl"
+METADATA_FILE = "model_metadata.json"
 DATA_STATS_CSV = "data_stats.csv"
 DATA_ELO_CSV = "data_elo.csv"
 DATA_FIFA_CSV = "data_fifa.csv"
 
-st.set_page_config(page_title="ProBet AI Predictor", page_icon="⚽", layout="wide")
+st.set_page_config(page_title="AI Goals Predictor PRO", page_icon="⚽", layout="wide")
 
-# --- CUSTOM CSS (Pro hezčí vzhled) ---
+# --- CUSTOM CSS ---
 st.markdown("""
 <style>
-    .big-font { font-size:24px !important; font-weight: bold; }
-    .score-board { background-color: #1E1E1E; padding: 20px; border-radius: 10px; text-align: center; color: white; margin-bottom: 20px;}
-    .team-name { font-size: 28px; font-weight: bold; color: #E0E0E0; }
-    .score { font-size: 48px; font-weight: 800; color: #4CAF50; margin: 0 20px; }
-    .meta-info { color: #B0BEC5; font-size: 14px; }
-    .metric-card { background-color: #f0f2f6; padding: 15px; border-radius: 8px; border-left: 5px solid #4CAF50; }
+    .main-header { font-size: 36px; font-weight: 800; color: #1E88E5; margin-bottom: 20px; }
+    .score-board { background-color: #121212; padding: 25px; border-radius: 15px; text-align: center; color: white; margin-bottom: 25px; border: 1px solid #333; }
+    .team-name { font-size: 26px; font-weight: bold; color: #FFFFFF; }
+    .score-digit { font-size: 50px; font-weight: 900; color: #4CAF50; margin: 0 15px; }
+    .metric-card { background: #f8f9fa; padding: 20px; border-radius: 12px; border-left: 6px solid #1E88E5; box-shadow: 2px 2px 10px rgba(0,0,0,0.05); }
+    .prob-text { font-size: 18px; font-weight: 600; color: #455A64; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- MAPPING FUNKCE ---
+# --- POMOCNÉ FUNKCE (Mapping & Pravděpodobnost) ---
 def normalize_name(name):
     if name is None: return ""
     name = str(name).lower().strip()
@@ -45,245 +56,174 @@ def normalize_name(name):
         "augsburg": "augsburg", "fc augsburg": "augsburg", "hoffenheim": "hoffenheim", "tsg 1899 hoffenheim": "hoffenheim",
         "union berlin": "union berlin", "1. fc union berlin": "union berlin", "bochum": "bochum", "vfl bochum 1848": "bochum",
         "fc heidenheim": "heidenheim", "1. fc heidenheim 1846": "heidenheim", "freiburg": "freiburg", "sc freiburg": "freiburg",
-        "hamburger sv": "hamburg",
-        "atletico madrid": "atletico", "atlético madrid": "atletico", "athletic club": "athletic", "athletic club de bilbao": "athletic",
-        "barcelona": "barcelona", "fc barcelona": "barcelona", "real betis": "betis", "real betis balompié": "betis",
-        "celta vigo": "celta", "rc celta": "celta", "real sociedad": "sociedad", "real oviedo": "oviedo",
-        "alaves": "alaves", "deportivo alavés": "alaves", "girona": "girona", "girona fc": "girona",
-        "mallorca": "mallorca", "rcd mallorca": "mallorca", "osasuna": "osasuna", "ca osasuna": "osasuna",
-        "sevilla": "sevilla", "sevilla fc": "sevilla", "valencia": "valencia", "valencia cf": "valencia",
-        "villarreal": "villarreal", "villarreal cf": "villarreal", "getafe": "getafe", "getafe cf": "getafe",
-        "espanyol": "espanyol", "rcd espanyol": "espanyol", "cadiz": "cadiz", "cádiz cf": "cadiz",
-        "almeria": "almeria", "ud almería": "almeria", "elche": "elche", "elche cf": "elche",
-        "valladolid": "valladolid", "real valladolid cf": "valladolid",
-        "paris saint germain": "paris sg", "paris saint-germain": "paris sg", "marseille": "marseille", "olympique de marseille": "marseille",
-        "lyon": "lyon", "olympique lyonnais": "lyon", "lille": "lille", "lille osc": "lille",
-        "monaco": "monaco", "as monaco": "monaco", "nice": "nice", "ogc nice": "nice",
-        "rennes": "rennes", "stade rennais fc": "rennes", "lens": "lens", "rc lens": "lens",
-        "strasbourg": "strasbourg", "rc strasbourg alsace": "strasbourg", "toulouse": "toulouse", "toulouse fc": "toulouse",
-        "nantes": "nantes", "fc nantes": "nantes", "reims": "reims", "stade de reims": "reims",
-        "montpellier": "montpellier", "montpellier hsc": "montpellier", "lorient": "lorient", "fc lorient": "lorient",
-        "metz": "metz", "fc metz": "metz", "brest": "brest", "stade brestois 29": "brest",
-        "le havre": "le havre", "le havre ac": "le havre", "auxerre": "auxerre", "aj auxerre": "auxerre",
-        "angers": "angers", "angers sco": "angers",
-        "ac milan": "milan", "inter": "inter", "juventus": "juventus", "roma": "roma", "lazio": "lazio",
-        "napoli": "napoli", "atalanta": "atalanta", "fiorentina": "fiorentina", "bologna": "bologna",
-        "torino": "torino", "udinese": "udinese", "empoli": "empoli", "verona": "verona", "hellas verona": "verona",
-        "hellas verona fc": "verona", "lecce": "lecce", "salernitana": "salernitana", "monza": "monza",
-        "sassuolo": "sassuolo", "frosinone": "frosinone", "genoa": "genoa", "cagliari": "cagliari",
-        "parma calcio 1913": "parma", "parma": "parma", "como": "como", "venezia": "venezia"
+        "hamburger sv": "hamburg", "atletico madrid": "atletico", "atlético madrid": "atletico", "athletic club": "athletic", 
+        "barcelona": "barcelona", "fc barcelona": "barcelona", "real sociedad": "sociedad", "sevilla": "sevilla", 
+        "valencia": "valencia", "villarreal": "villarreal", "getafe": "getafe", "ac milan": "milan", "inter": "inter", 
+        "juventus": "juventus", "roma": "roma", "napoli": "napoli", "atalanta": "atalanta"
     }
-    if name in mapping: return mapping[name]
-    for key, value in mapping.items():
-        if key in name: return value
-    return name
+    return mapping.get(name, name)
 
-# --- NAČÍTÁNÍ DAT ---
+def calculate_probs(predicted_total, current_goals):
+    def poisson(k, lamb): return (lamb**k * math.exp(-lamb)) / math.factorial(k)
+    lamb = max(0.01, predicted_total - current_goals)
+    probs = {i: poisson(i, lamb) for i in range(7)}
+    over_probs = {
+        f"Over {current_goals + 0.5}": 1.0 - probs[0],
+        f"Over {current_goals + 1.5}": 1.0 - (probs[0] + probs[1]),
+        f"Over {current_goals + 2.5}": 1.0 - (probs[0] + probs[1] + probs[2])
+    }
+    return over_probs, lamb
+
+# --- NAČÍTÁNÍ ZDROJŮ ---
 @st.cache_resource
-def load_stuff():
+def load_model_assets():
     try:
-        model = xgb.XGBRegressor()
-        model.load_model(MODEL_FILE)
-        features = joblib.load(FEATURES_FILE)
-        return model, features
+        m = xgb.XGBRegressor()
+        m.load_model(MODEL_FILE)
+        f = joblib.load(FEATURES_FILE)
+        return m, f
     except: return None, None
 
 @st.cache_data
-def load_csv():
+def load_static_data():
     try:
         stats = pd.read_csv(DATA_STATS_CSV)
         elo = pd.read_csv(DATA_ELO_CSV)
         fifa = pd.read_csv(DATA_FIFA_CSV)
-        stats['norm_home'] = stats['home_team'].apply(normalize_name)
-        stats['norm_away'] = stats['away_team'].apply(normalize_name)
-        elo['norm_team'] = elo['team'].apply(normalize_name)
-        fifa['norm_team'] = fifa['team'].apply(normalize_name)
         
+        stats['norm_h'] = stats['home_team'].apply(normalize_name)
+        stats['norm_a'] = stats['away_team'].apply(normalize_name)
+        
+        # Home/Away Split Profily
         profiles = {}
-        all_teams = set(stats['norm_home'].unique()) | set(stats['norm_away'].unique())
+        all_teams = set(stats['norm_h']) | set(stats['norm_a'])
         for team in all_teams:
-            h = stats[stats['norm_home'] == team]
-            a = stats[stats['norm_away'] == team]
-            tot = len(h)+len(a)
-            if tot<3: continue
-            ppda = (h['home_ppda'].mean() + a['away_ppda'].mean())/2 if 'home_ppda' in stats.columns else 10
-            deep = (h['home_deep_completions'].mean() + a['away_deep_completions'].mean())/2 if 'home_deep_completions' in stats.columns else 5
-            xg = (h['home_xg'].sum() + a['away_xg'].sum())/tot
-            profiles[team] = {'avg_xg': xg, 'ppda': ppda, 'deep': deep}
-            
-        latest_elo = elo.sort_values('valid_from').groupby('norm_team').tail(1).set_index('norm_team')['elo'].to_dict()
-        fifa_map = fifa.set_index('norm_team')[['attack','defence','overall']].to_dict('index')
-        return sorted(list(all_teams)), latest_elo, fifa_map, profiles
+            h_games = stats[stats['norm_h'] == team]
+            a_games = stats[stats['norm_a'] == team]
+            profiles[team] = {
+                'h_att': h_games['home_xg'].mean() if not h_games.empty else 1.4,
+                'h_def': h_games['away_xg'].mean() if not h_games.empty else 1.2,
+                'a_att': a_games['away_xg'].mean() if not a_games.empty else 1.1,
+                'a_def': a_games['home_xg'].mean() if not a_games.empty else 1.5
+            }
+        
+        elo_map = elo.sort_values('valid_from').groupby('team').tail(1).set_index('team')['elo'].to_dict()
+        fifa_map = fifa.set_index('team')[['attack', 'defence', 'overall']].to_dict('index')
+        
+        return sorted(list(all_teams)), elo_map, fifa_map, profiles
     except: return [], {}, {}, {}
 
-# --- POISSON CALCULATOR (Pro sázkové pravděpodobnosti) ---
-def poisson_probability(k, lamb):
-    return (lamb**k * math.exp(-lamb)) / math.factorial(k)
+# --- LOGIKA LIVE DAT ---
+model, feat_names = load_model_assets()
+teams, db_elo, db_fifa, db_profiles = load_static_data()
 
-def calculate_probs(predicted_total, current_goals):
-    remaining_lambda = max(0.01, predicted_total - current_goals)
+st.sidebar.title("📡 Live Feed")
+if st.sidebar.button("🔄 Refresh Live Matches"):
+    st.session_state['live_list'] = get_live_matches()
+
+if 'live_list' in st.session_state and st.session_state['live_list']:
+    match_options = {f"{m['home']} - {m['away']} ({m['time']}')": m for m in st.session_state['live_list']}
+    selected = st.sidebar.selectbox("Select match:", list(match_options.keys()))
+    if st.sidebar.button("⚡ Load Match Data"):
+        m = match_options[selected]
+        d = get_match_details(m['id'])
+        st.session_state.update({
+            'min': int(m['time'].split('+')[0]), 'sh': m['score_h'], 'sa': m['score_a'],
+            'xgh': d.get('xg_h', 0.0), 'xga': d.get('xg_a', 0.0),
+            'sth': d.get('shots_h', 0), 'sta': d.get('shots_a', 0)
+        })
+
+# --- HLAVNÍ FORMULÁŘ ---
+st.markdown('<div class="main-header">AI Goals Predictor PRO</div>', unsafe_allow_html=True)
+
+col_t1, col_t2 = st.columns(2)
+h_team = col_t1.selectbox("🏠 Home Team", teams, index=0)
+a_team = col_t2.selectbox("✈️ Away Team", teams, index=1)
+
+with st.container():
+    st.markdown("### Live Match Statistics")
+    c1, c2, c3 = st.columns(3)
+    minute = c1.number_input("⏱ Minute", 0, 90, st.session_state.get('min', 45))
+    score_h = c2.number_input(f"Score {h_team}", 0, 15, st.session_state.get('sh', 0))
+    score_a = c3.number_input(f"Score {a_team}", 0, 15, st.session_state.get('sa', 0))
     
-    # Šance na přesně 0, 1, 2... dalších gólů
-    probs = {}
-    for i in range(6):
-        probs[i] = poisson_probability(i, remaining_lambda)
-    
-    # Cumulative probabilities (Over lines)
-    over_probs = {
-        f"Over {current_goals + 0.5}": 1.0 - probs[0], # Padne aspoň 1
-        f"Over {current_goals + 1.5}": 1.0 - (probs[0] + probs[1]), # Padnou aspoň 2
-        f"Over {current_goals + 2.5}": 1.0 - (probs[0] + probs[1] + probs[2]) # Padnou aspoň 3
-    }
-    return over_probs, remaining_lambda
+    c4, c5, c6, c7 = st.columns(4)
+    xg_h = c4.number_input(f"xG {h_team}", 0.0, 10.0, st.session_state.get('xgh', 0.0), step=0.1)
+    shots_h = c5.number_input(f"Shots {h_team}", 0, 50, st.session_state.get('sth', 0))
+    xg_a = c6.number_input(f"xG {a_team}", 0.0, 10.0, st.session_state.get('xga', 0.0), step=0.1)
+    shots_a = c7.number_input(f"Shots {a_team}", 0, 50, st.session_state.get('sta', 0))
 
-# --- UI START ---
-model, feat_names = load_stuff()
-teams, db_elo, db_fifa, db_profiles = load_csv()
-
-# 1. SETUP ZÁPASU (Sidebar pro čistší vzhled)
-with st.sidebar:
-    st.header("⚙️ Nastavení Zápasu")
-    h_team = st.selectbox("Domácí", teams, index=0)
-    a_team = st.selectbox("Hosté", teams, index=1)
-    
-    h_norm, a_norm = normalize_name(h_team), normalize_name(a_team)
-    h_e, a_e = db_elo.get(h_norm, 1500), db_elo.get(a_norm, 1500)
-    f_h = db_fifa.get(h_norm, {'attack': 75, 'defence': 75, 'overall': 75})
-    f_a = db_fifa.get(a_norm, {'attack': 75, 'defence': 75, 'overall': 75})
-
-    st.divider()
-    st.info(f"**Elo Strength:**\n{h_team}: {int(h_e)}\n{a_team}: {int(a_e)}")
-
-# 2. SCOREBOARD HEADER
-col_min, col_sc, col_stats = st.columns([1, 4, 1])
-
-# Vstupy (Umístíme je trochu elegantněji)
-st.markdown("### 📝 Live Statistiky")
-r1_c1, r1_c2, r1_c3 = st.columns([1, 1, 1])
-with r1_c1:
-    minute = st.number_input("⏱ Minuta", 0, 90, 45)
-with r1_c2:
-    s_h = st.number_input(f"Góly {h_team}", 0, 10, 0)
-with r1_c3:
-    s_a = st.number_input(f"Góly {a_team}", 0, 10, 0)
-
-r2_c1, r2_c2, r2_c3, r2_c4 = st.columns(4)
-with r2_c1: xg_h = st.number_input(f"xG {h_team}", 0.0, 10.0, 0.0, step=0.01)
-with r2_c2: sh_h = st.number_input(f"Střely {h_team}", 0, 40, 0)
-with r2_c3: xg_a = st.number_input(f"xG {a_team}", 0.0, 10.0, 0.0, step=0.01)
-with r2_c4: sh_a = st.number_input(f"Střely {a_team}", 0, 40, 0)
-
-# Vizuální Scoreboard
 st.markdown(f"""
 <div class="score-board">
-    <div class="meta-info">LIVE PREDICTION ENGINE • {minute}' MIN</div>
-    <div>
-        <span class="team-name">{h_team}</span>
-        <span class="score">{s_h} - {s_a}</span>
-        <span class="team-name">{a_team}</span>
-    </div>
-    <div class="meta-info">xG: {xg_h} - {xg_a}</div>
+    <span class="team-name">{h_team}</span>
+    <span class="score-digit">{score_h}</span>
+    <span class="score-digit">:</span>
+    <span class="score-digit">{score_a}</span>
+    <span class="team-name">{a_team}</span>
+    <div style="margin-top:10px; opacity:0.7;">Minute: {minute}' | xG: {xg_h:.2f} - {xg_a:.2f}</div>
 </div>
 """, unsafe_allow_html=True)
 
-
-# --- VÝPOČET A PŘEDPOVĚĎ ---
-if st.button("🚀 ANALYZOVAT A PŘEDPOVĚDĚT", type="primary", use_container_width=True):
-    
-    # 1. Příprava dat
-    prof = db_profiles.get(h_norm, {'avg_xg': 1.3, 'ppda': 10, 'deep': 6})
-    input_data = {
-        'minute': minute, 'time_remaining': 90-minute,
-        'score_home': s_h, 'score_away': s_a, 'goal_diff': s_h-s_a,
-        'current_total_goals': s_h+s_a, 'is_draw': 1 if s_h==s_a else 0,
-        'xg_home': xg_h, 'xg_away': xg_a, 'xg_total': xg_h+xg_a, 'xg_diff': xg_h-xg_a,
-        'shots_home': sh_h, 'shots_away': sh_a,
-        'efficiency_h': s_h-xg_h, 'efficiency_a': s_a-xg_a,
-        'avg_shot_qual_h': (xg_h/sh_h) if sh_h>0 else 0,
-        'momentum_xg_h': 0.0, 'momentum_pressure_h': 0.0, # HACK
-        'elo_home': h_e, 'elo_diff': h_e-a_e,
-        'fifa_att_diff': int(f_h['attack'])-int(f_a['attack']),
-        'fifa_def_diff': int(f_h['defence'])-int(f_a['defence']),
-        'squad_qual_diff': int(f_h['overall'])-int(f_a['overall']),
-        'profile_avg_xg_h': prof['avg_xg'], 'profile_ppda_h': prof['ppda'], 'profile_deep_h': prof['deep']
-    }
-    
-    df_in = pd.DataFrame([input_data])
-    try:
-        pred_total = model.predict(df_in[feat_names])[0]
-    except:
-        st.error("Chyba modelu.")
-        st.stop()
-
-    # 2. Probability Engine (Poisson)
-    current_goals = s_h + s_a
-    over_probs, expected_more = calculate_probs(pred_total, current_goals)
-
-    # --- DASHBOARD VÝSLEDKŮ ---
-    
-    # A. HLAVNÍ KARTY
-    c_res1, c_res2, c_res3 = st.columns([1.2, 1, 1])
-    
-    with c_res1:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.caption("🏁 PŘEDPOKLÁDANÝ TOTAL")
-        st.markdown(f"<h1 style='color: #2196F3; margin:0;'>{pred_total:.2f}</h1>", unsafe_allow_html=True)
-        st.write(f"Model očekává ještě **{expected_more:.2f}** gólů.")
-        st.markdown('</div>', unsafe_allow_html=True)
+# --- PREDIKCE ---
+if st.button("🔮 RUN AI PREDICTION", type="primary", use_container_width=True):
+    if model:
+        h_n, a_n = normalize_name(h_team), normalize_name(a_team)
+        ph, pa = db_profiles.get(h_n, {}), db_profiles.get(a_n, {})
+        eh, ea = db_elo.get(h_n, 1500), db_elo.get(a_n, 1500)
+        fh, fa = db_fifa.get(h_n, {'attack':75, 'defence':75, 'overall':75}), db_fifa.get(a_n, {'attack':75, 'defence':75, 'overall':75})
         
-    with c_res2:
-        # SÁZKOVÉ ŠANCE
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.caption("🎲 SÁZKOVÉ ŠANCE")
+        in_data = pd.DataFrame([{
+            'minute': minute, 'time_remaining': 90-minute, 'score_home': score_h, 'score_away': score_a,
+            'goal_diff': score_h-score_a, 'current_total_goals': score_h+score_a,
+            'xg_home': xg_h, 'xg_away': xg_a, 'xg_total': xg_h+xg_a, 'xg_diff': xg_h-xg_a,
+            'shots_home': shots_h, 'shots_away': shots_a, 'efficiency_h': score_h-xg_h, 'efficiency_a': score_a-xg_a,
+            'elo_home': eh, 'elo_diff': eh-ea, 'fifa_att_diff': fh['attack']-fa['attack'], 'squad_qual_diff': fh['overall']-fa['overall'],
+            'home_team_home_att': ph.get('h_att', 1.3), 'home_team_home_def': ph.get('h_def', 1.2),
+            'away_team_away_att': pa.get('a_att', 1.1), 'away_team_away_def': pa.get('a_def', 1.4),
+            'avg_shot_qual_h': (xg_h/shots_h) if shots_h>0 else 0
+        }])
         
-        # Klíčová sázka (Nejbližší Over)
-        next_line = int(current_goals)
-        key_prob = over_probs.get(f"Over {next_line + 0.5}", 0) * 100
+        pred_total = model.predict(in_data[feat_names])[0]
+        over_probs, expected_more = calculate_probs(pred_total, score_h+score_a)
         
-        st.metric(f"OVER {next_line}.5", f"{key_prob:.1f} %")
-        st.progress(int(key_prob))
+        # --- VÝSLEDKY ---
+        st.divider()
+        res_c1, res_c2 = st.columns([1, 1.5])
         
-        # Vyšší line
-        higher_line_prob = over_probs.get(f"Over {next_line + 1.5}", 0) * 100
-        if higher_line_prob > 30:
-            st.caption(f"Šance na Over {next_line + 1}.5: **{higher_line_prob:.1f} %**")
+        with res_c1:
+            st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+            st.subheader("Predicted Total")
+            st.title(f"{pred_total:.2f}")
+            st.write(f"Remaining Expected Goals: **{expected_more:.2f}**")
+            st.markdown('</div>', unsafe_allow_html=True)
             
-        st.markdown('</div>', unsafe_allow_html=True)
+            st.write("")
+            for line, prob in over_probs.items():
+                col_p1, col_p2 = st.columns([1, 3])
+                col_p1.markdown(f"**{line}**")
+                col_p2.progress(int(prob*100))
+                st.caption(f"Probability: {prob*100:.1f}%")
 
-    with c_res3:
-         # ATTACK PERFORMANCE
-        eff_h = s_h - xg_h
-        eff_a = s_a - xg_a
-        
-        fig_bar = go.Figure()
-        fig_bar.add_trace(go.Bar(
-            x=[eff_h, eff_a], y=[h_team, a_team], orientation='h',
-            marker=dict(color=['#66BB6A' if eff_h>=0 else '#EF5350', '#66BB6A' if eff_a>=0 else '#EF5350'])
-        ))
-        fig_bar.update_layout(title="Efektivita (Goals vs xG)", height=150, margin=dict(l=10, r=10, t=30, b=20), xaxis=dict(range=[-2, 2]))
-        st.plotly_chart(fig_bar, use_container_width=True)
+        with res_c2:
+            fig = go.Figure(go.Indicator(
+                mode = "gauge+number", value = pred_total, title = {'text': "Total Goals Expectancy"},
+                gauge = {'axis': {'range': [0, 6]}, 'bar': {'color': "#1E88E5"},
+                         'steps': [{'range': [0, 2.5], 'color': "#eeeeee"}, {'range': [2.5, 4.5], 'color': "#dddddd"}]}
+            ))
+            fig.update_layout(height=350, margin=dict(l=20, r=20, t=50, b=20))
+            st.plotly_chart(fig, use_container_width=True)
 
-    # B. VISUAL GOAL PROGRESS
-    st.write("---")
-    st.subheader("📊 Goal Timeline Prediction")
-    
-    fig = go.Figure()
-    # Šedá zóna (Co už padlo)
-    fig.add_trace(go.Bar(
-        y=['Zápas'], x=[current_goals], name='Aktuální stav', orientation='h',
-        marker=dict(color='#CFD8DC', line=dict(width=0))
-    ))
-    # Barevná zóna (Co se čeká)
-    color_pred = '#4CAF50' if expected_more > 0.5 else '#FF9800'
-    fig.add_trace(go.Bar(
-        y=['Zápas'], x=[expected_more], name='Očekávaný přídavek', orientation='h',
-        marker=dict(color=color_pred, line=dict(width=0)),
-        text=[f"+{expected_more:.2f}"], textposition='auto'
-    ))
-    
-    fig.update_layout(
-        barmode='stack', height=100, margin=dict(l=0, r=0, t=0, b=0),
-        xaxis=dict(range=[0, max(4, int(pred_total)+1)], showgrid=True),
-        yaxis=dict(showticklabels=False), showlegend=False
-    )
-    st.plotly_chart(fig, use_container_width=True)
+# --- METADATA ---
+st.write("")
+with st.expander("🧠 Model Information & Statistics"):
+    try:
+        with open(METADATA_FILE, "r") as f:
+            meta = json.load(f)
+        m_c1, m_c2, m_c3, m_c4 = st.columns(4)
+        m_c1.metric("Model MAE", meta['mae'])
+        m_c2.metric("Train Matches", f"~{meta['train_rows']//90}")
+        m_c3.metric("Test Matches", f"~{meta['test_rows']//90}")
+        m_c4.metric("Features", meta['features'])
+        st.caption(f"Last training: {meta['date']} | Data interval: 1 minute snapshot")
+    except:
+        st.info("No metadata available. Run training script first.")
