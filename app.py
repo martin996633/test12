@@ -8,16 +8,16 @@ import math
 import json
 import os
 
-# --- KONFIGURACE ---
-# DŮLEŽITÉ: Používáme .ubj (binární formát), protože .json je pro tento model moc velký a padal ti.
-MODEL_FILE = "ultimate_goals_model.ubj"
-FEATURES_FILE = "model_features.pkl"
-METADATA_FILE = "model_metadata.json"
+# --- KONFIGURACE SOUBORŮ ---
+# Používáme .ubj (binární formát), který jsi nahrál na GitHub
+MODEL_FILENAME = "ultimate_goals_model.ubj"
+FEATURES_FILENAME = "model_features.pkl"
+METADATA_FILENAME = "model_metadata.json"
 
-# CSV soubory pro výpočet profilů
-DATA_STATS_CSV = "data_stats.csv" 
-DATA_ELO_CSV = "data_elo.csv"
-DATA_FIFA_CSV = "data_fifa.csv"
+# CSV data
+STATS_CSV = "data_stats.csv"
+ELO_CSV = "data_elo.csv"
+FIFA_CSV = "data_fifa.csv"
 
 st.set_page_config(page_title="AI Goals Predictor PRO", page_icon="⚽", layout="wide")
 
@@ -69,34 +69,51 @@ def calculate_probs(predicted_total, current_goals):
     }
     return over_probs, lamb
 
-# --- NAČÍTÁNÍ ZDROJŮ ---
+# --- 🛠️ HLAVNÍ FIX: NAČÍTÁNÍ MODELU ---
 @st.cache_resource
 def load_model_assets():
     try:
+        # Získáme absolutní cestu k adresáři, kde leží tento skript (app.py)
+        # To zajistí, že Streamlit ví přesně, kde hledat, i když běží v jiném kontextu.
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        
+        path_model = os.path.join(current_dir, MODEL_FILENAME)
+        path_features = os.path.join(current_dir, FEATURES_FILENAME)
+
+        # Kontrola, jestli soubor existuje
+        if not os.path.exists(path_model):
+            st.error(f"❌ CHYBA: Soubor modelu nebyl nalezen na cestě: {path_model}")
+            st.write("Obsah složky:", os.listdir(current_dir)) # Debug výpis
+            return None, None
+
         m = xgb.XGBRegressor()
-        # Změna: Načítáme .ubj místo .json
-        m.load_model(MODEL_FILE)
-        f = joblib.load(FEATURES_FILE)
+        m.load_model(path_model)
+        f = joblib.load(path_features)
+        
         return m, f
     except Exception as e:
-        st.error(f"❌ Chyba při načítání modelu ({MODEL_FILE}): {e}")
-        st.info("Tip: Ujisti se, že jsi přetrénoval model do formátu .ubj (je menší a nepadá).")
+        st.error(f"❌ Chyba při načítání XGBoost modelu: {e}")
         return None, None
 
 @st.cache_data
 def load_static_data():
     try:
-        if not os.path.exists(DATA_STATS_CSV):
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        path_stats = os.path.join(current_dir, STATS_CSV)
+        path_elo = os.path.join(current_dir, ELO_CSV)
+        path_fifa = os.path.join(current_dir, FIFA_CSV)
+
+        if not os.path.exists(path_stats):
             return [], {}, {}, {}
 
-        stats = pd.read_csv(DATA_STATS_CSV)
-        elo = pd.read_csv(DATA_ELO_CSV)
-        fifa = pd.read_csv(DATA_FIFA_CSV)
+        stats = pd.read_csv(path_stats)
+        elo = pd.read_csv(path_elo)
+        fifa = pd.read_csv(path_fifa)
         
         stats['norm_h'] = stats['home_team'].apply(normalize_name)
         stats['norm_a'] = stats['away_team'].apply(normalize_name)
         
-        # Výpočet profilů
+        # Výpočet Home/Away profilů
         profiles = {}
         all_teams = set(stats['norm_h'].unique()) | set(stats['norm_a'].unique())
         
@@ -118,7 +135,7 @@ def load_static_data():
         
         return sorted(list(all_teams)), elo_map, fifa_map, profiles
     except Exception as e:
-        st.warning(f"⚠️ Nepodařilo se načíst CSV data: {e}")
+        st.warning(f"⚠️ Chyba při načítání CSV dat: {e}")
         return [], {}, {}, {}
 
 # --- INITIALIZACE ---
@@ -247,14 +264,17 @@ if st.button("🚀 VYPOČÍTAT PREDIKCI", type="primary", use_container_width=Tr
             st.write("Aplikace posílá:", list(df_in.columns))
             st.write("Model očekává:", feat_names)
     else:
-        st.error("Model není načten. Zkontroluj soubory na GitHubu.")
+        st.error("Model není načten. Podívej se na chybu výše.")
 
 # --- FOOTER METADATA ---
 st.write("")
 with st.expander("ℹ️ Informace o modelu"):
-    if os.path.exists(METADATA_FILE):
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    path_meta = os.path.join(current_dir, METADATA_FILENAME)
+    
+    if os.path.exists(path_meta):
         try:
-            with open(METADATA_FILE, "r") as f:
+            with open(path_meta, "r") as f:
                 meta = json.load(f)
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Chyba (MAE)", meta.get('mae_score', 'N/A'))
