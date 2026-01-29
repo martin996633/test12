@@ -8,8 +8,7 @@ import math
 import json
 import os
 
-# --- KONFIGURACE SOUBORŮ ---
-MODEL_FILENAME = "ultimate_goals_model.ubj"
+MODEL_FILENAME = "game_model.ubj"  # <--- Nový název
 FEATURES_FILENAME = "model_features.pkl"
 METADATA_FILENAME = "model_metadata.json"
 
