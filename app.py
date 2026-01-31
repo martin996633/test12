@@ -7,280 +7,153 @@ import plotly.graph_objects as go
 import math
 import json
 import os
-import zipfile  # <--- Klíčová knihovna pro práci se ZIPem
+import zipfile
 
-# --- KONFIGURACE SOUBORŮ ---
-# Aplikace hledá ZIP archiv. Pokud v něm najde model, použije ho.
-MODEL_ARCHIVE = "game_model.zip" 
-MODEL_FILENAME = "game_model.ubj" # Název souboru uvnitř ZIPu
-FEATURES_FILENAME = "model_features.pkl"
-METADATA_FILENAME = "model_metadata.json"
+# --- KONFIGURACE ---
+MODEL_ARCHIVE = "blind_remaining_model.zip"
+MODEL_FILENAME = "blind_remaining_model.ubj"
+FEATURES_FILENAME = "blind_remaining_features.pkl"
+METADATA_FILENAME = "blind_remaining_metadata.json"
 
-# CSV data (Statistiky, Elo, FIFA)
-STATS_CSV = "data_stats.csv"
-ELO_CSV = "data_elo.csv"
-FIFA_CSV = "data_fifa.csv"
+st.set_page_config(page_title="AI Blind Predictor (Remaining)", page_icon="🔮", layout="wide")
 
-st.set_page_config(page_title="AI Goals Predictor PRO", page_icon="⚽", layout="wide")
-
-# --- CSS STYLY ---
+# --- STYLY ---
 st.markdown("""
 <style>
-    .main-header { font-size: 36px; font-weight: 800; color: #1E88E5; margin-bottom: 20px; text-align: center;}
+    .main-header { font-size: 36px; font-weight: 800; color: #D81B60; margin-bottom: 20px; text-align: center;}
     .score-board { background-color: #121212; padding: 25px; border-radius: 15px; text-align: center; color: white; margin-bottom: 25px; border: 1px solid #333; }
-    .team-name { font-size: 26px; font-weight: bold; color: #FFFFFF; }
-    .score-digit { font-size: 50px; font-weight: 900; color: #4CAF50; margin: 0 15px; }
-    .metric-card { background: #f8f9fa; padding: 20px; border-radius: 12px; border-left: 6px solid #1E88E5; box-shadow: 2px 2px 10px rgba(0,0,0,0.05); }
-    .debug-box { background-color: #ffebee; padding: 10px; border-radius: 5px; border: 1px solid #ffcdd2; color: #c62828; margin-bottom: 10px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- POMOCNÉ FUNKCE ---
-def normalize_name(name):
-    if name is None: return ""
-    name = str(name).lower().strip()
-    mapping = {
-        "man city": "man city", "manchester city": "man city", "man utd": "man united", "manchester united": "man united", 
-        "nott'm forest": "forest", "nottingham forest": "forest", "spurs": "tottenham", "tottenham hotspur": "tottenham",
-        "wolves": "wolverhampton wanderers", "newcastle": "newcastle united", "brighton": "brighton & hove albion",
-        "west ham": "west ham united", "sheffield utd": "sheffield united", "leicester": "leicester city", "leeds": "leeds united", "luton": "luton town",
-        "bayern munich": "bayern", "fc bayern münchen": "bayern", "bayer leverkusen": "leverkusen", "bayer 04 leverkusen": "leverkusen",
-        "borussia dortmund": "dortmund", "borussia m.gladbach": "gladbach", "borussia mönchengladbach": "gladbach",
-        "eintracht frankfurt": "frankfurt", "rasenballsport leipzig": "rb leipzig", "rb leipzig": "rb leipzig",
-        "fc cologne": "koeln", "1. fc köln": "koeln", "mainz 05": "mainz", "1. fsv mainz 05": "mainz",
-        "st. pauli": "st pauli", "fc st. pauli": "st pauli", "vfb stuttgart": "stuttgart",
-        "werder bremen": "werder", "sv werder bremen": "werder", "wolfsburg": "wolfsburg", "vfl wolfsburg": "wolfsburg",
-        "augsburg": "augsburg", "fc augsburg": "augsburg", "hoffenheim": "hoffenheim", "tsg 1899 hoffenheim": "hoffenheim",
-        "union berlin": "union berlin", "1. fc union berlin": "union berlin", "bochum": "bochum", "vfl bochum 1848": "bochum",
-        "fc heidenheim": "heidenheim", "1. fc heidenheim 1846": "heidenheim", "freiburg": "freiburg", "sc freiburg": "freiburg",
-        "hamburger sv": "hamburg", "atletico madrid": "atletico", "atlético madrid": "atletico", "athletic club": "athletic", 
-        "barcelona": "barcelona", "fc barcelona": "barcelona", "real sociedad": "sociedad", "sevilla": "sevilla", 
-        "valencia": "valencia", "villarreal": "villarreal", "getafe": "getafe", "ac milan": "milan", "inter": "inter", 
-        "juventus": "juventus", "roma": "roma", "napoli": "napoli", "atalanta": "atalanta"
-    }
-    return mapping.get(name, name)
-
-def calculate_probs(predicted_total, current_goals):
+# Funkce pro pravděpodobnosti (Upravená pro 'remaining')
+def calculate_probs(predicted_remaining, current_goals):
+    # Lambda nemůže být záporná, minimum je 0.01
+    lamb = max(0.01, predicted_remaining)
+    
     def poisson(k, lamb): return (lamb**k * math.exp(-lamb)) / math.factorial(k)
-    lamb = max(0.01, predicted_total - current_goals)
     probs = {i: poisson(i, lamb) for i in range(7)}
     
-    over_probs = {
-        f"Over {current_goals + 0.5}": 1.0 - probs[0],
-        f"Over {current_goals + 1.5}": 1.0 - (probs[0] + probs[1]),
-        f"Over {current_goals + 2.5}": 1.0 - (probs[0] + probs[1] + probs[2])
+    # Over/Under počítáme k CELKOVÉMU skóre
+    # Příklad: Stav 1:0 (current=1). Over 1.5 znamená, že padne ještě aspoň 1 gól (k > 0)
+    
+    over = {
+        f"Over {current_goals + 0.5}": 1.0 - probs[0],          # Padne > 0 dalších
+        f"Over {current_goals + 1.5}": 1.0 - (probs[0]+probs[1]), # Padne > 1 dalších
+        f"Over {current_goals + 2.5}": 1.0 - (probs[0]+probs[1]+probs[2])
     }
-    under_probs = {
+    
+    under = {
         f"Under {current_goals + 0.5}": probs[0],
-        f"Under {current_goals + 1.5}": probs[0] + probs[1],
-        f"Under {current_goals + 2.5}": probs[0] + probs[1] + probs[2]
+        f"Under {current_goals + 1.5}": probs[0]+probs[1],
+        f"Under {current_goals + 2.5}": probs[0]+probs[1]+probs[2]
     }
-    return over_probs, under_probs, lamb
+    return over, under, lamb
 
-# --- 🛡️ ROBUSTNÍ NAČÍTÁNÍ SE ZIPEM ---
 @st.cache_resource
-def load_model_assets():
+def load_model():
     try:
-        # 1. Získání absolutní cesty
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        
         path_archive = os.path.join(current_dir, MODEL_ARCHIVE)
         path_model = os.path.join(current_dir, MODEL_FILENAME)
         path_features = os.path.join(current_dir, FEATURES_FILENAME)
 
-        # 2. Logika rozbalování ZIPu
         if not os.path.exists(path_model):
             if os.path.exists(path_archive):
-                # Rozbalíme ZIP
                 with zipfile.ZipFile(path_archive, 'r') as zip_ref:
                     zip_ref.extractall(current_dir)
             else:
-                st.error(f"❌ CHYBA: Nenalezen soubor modelu ({MODEL_FILENAME}) ani archiv ({MODEL_ARCHIVE}).")
-                st.write("Obsah složky na serveru:", os.listdir(current_dir))
                 return None, None
 
-        # 3. Načtení modelu
         m = xgb.XGBRegressor()
         m.load_model(path_model)
         f = joblib.load(path_features)
-        
         return m, f
-    except Exception as e:
-        st.error(f"❌ Kritická chyba při načítání modelu: {e}")
-        return None, None
+    except: return None, None
 
-@st.cache_data
-def load_static_data():
-    try:
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        path_stats = os.path.join(current_dir, STATS_CSV)
-        path_elo = os.path.join(current_dir, ELO_CSV)
-        path_fifa = os.path.join(current_dir, FIFA_CSV)
+model, feat_names = load_model()
 
-        if not os.path.exists(path_stats):
-            return [], {}, {}, {}
+# --- UI ---
+st.markdown('<div class="main-header">🔮 AI Blind Predictor</div>', unsafe_allow_html=True)
+st.caption("Model trénovaný na predikci ZBÝVAJÍCÍCH gólů (Remaining Goals).")
 
-        stats = pd.read_csv(path_stats)
-        elo = pd.read_csv(path_elo)
-        fifa = pd.read_csv(path_fifa)
-        
-        stats['norm_h'] = stats['home_team'].apply(normalize_name)
-        stats['norm_a'] = stats['away_team'].apply(normalize_name)
-        
-        profiles = {}
-        all_teams = set(stats['norm_h'].unique()) | set(stats['norm_a'].unique())
-        
-        for team in all_teams:
-            h_games = stats[stats['norm_h'] == team]
-            a_games = stats[stats['norm_a'] == team]
-            profiles[team] = {
-                'h_att': h_games['home_xg'].mean() if len(h_games) > 1 else 1.4,
-                'h_def': h_games['away_xg'].mean() if len(h_games) > 1 else 1.2,
-                'a_att': a_games['away_xg'].mean() if len(a_games) > 1 else 1.1,
-                'a_def': a_games['home_xg'].mean() if len(a_games) > 1 else 1.5
-            }
-        
-        elo['norm_team'] = elo['team'].apply(normalize_name)
-        elo_map = elo.sort_values('valid_from').groupby('norm_team').tail(1).set_index('norm_team')['elo'].to_dict()
-        fifa['norm_team'] = fifa['team'].apply(normalize_name)
-        fifa_map = fifa.set_index('norm_team')[['attack', 'defence', 'overall']].to_dict('index')
-        
-        return sorted(list(all_teams)), elo_map, fifa_map, profiles
-    except Exception as e:
-        st.warning(f"⚠️ Chyba při načítání dat: {e}")
-        return [], {}, {}, {}
+c1, c2 = st.columns(2)
+h_name = c1.text_input("Domácí", "Domácí")
+a_name = c2.text_input("Hosté", "Hosté")
 
-# --- INITIALIZACE ---
-model, feat_names = load_model_assets()
-teams, db_elo, db_fifa, db_profiles = load_static_data()
-
-# --- HLAVNÍ UI ---
-st.markdown('<div class="main-header">🤖 AI Goals Calculator</div>', unsafe_allow_html=True)
-
-col_t1, col_t2 = st.columns(2)
-h_team = col_t1.selectbox("🏠 Domácí Tým", teams, index=0)
-a_team = col_t2.selectbox("✈️ Hostující Tým", teams, index=1)
-
-st.markdown("### 📝 Zadej aktuální stav")
+st.markdown("### 📊 Zadej statistiky")
 with st.container():
-    c1, c2, c3 = st.columns(3)
-    minute = c1.number_input("⏱ Minuta", 0, 95, 0)
-    score_h = c2.number_input(f"Góly {h_team}", 0, 15, 0)
-    score_a = c3.number_input(f"Góly {a_team}", 0, 15, 0)
+    col1, col2, col3 = st.columns(3)
+    minute = col1.number_input("Minuta", 0, 95, 45)
+    g_h = col2.number_input(f"Góly {h_name}", 0, 10, 0)
+    g_a = col3.number_input(f"Góly {a_name}", 0, 10, 0)
     
-    c4, c5, c6, c7 = st.columns(4)
-    xg_h = c4.number_input(f"xG {h_team}", 0.0, 10.0, 0.0, step=0.01)
-    shots_h = c5.number_input(f"Střely {h_team}", 0, 50, 0)
-    xg_a = c6.number_input(f"xG {a_team}", 0.0, 10.0, 0.0, step=0.01)
-    shots_a = c7.number_input(f"Střely {a_team}", 0, 50, 0)
+    st.divider()
+    c_xg, c_sh, c_sot = st.columns(3)
+    
+    # DOMÁCÍ
+    c_xg.markdown(f"**{h_name}**")
+    xg_h = c_xg.number_input(f"xG Home", 0.0, 10.0, 0.0, step=0.01)
+    sh_h = c_sh.number_input(f"Střely Home", 0, 50, 0)
+    sot_h = c_sot.number_input(f"SoT Home", 0, 50, 0)
+    
+    # HOSTÉ
+    c_xg.markdown(f"**{a_name}**")
+    xg_a = c_xg.number_input(f"xG Away", 0.0, 10.0, 0.0, step=0.01)
+    sh_a = c_sh.number_input(f"Střely Away", 0, 50, 0)
+    sot_a = c_sot.number_input(f"SoT Away", 0, 50, 0)
 
 st.markdown(f"""
 <div class="score-board">
-    <span class="team-name">{h_team}</span>
-    <span class="score-digit">{score_h}</span>
-    <span class="score-digit">:</span>
-    <span class="score-digit">{score_a}</span>
-    <span class="team-name">{a_team}</span>
-    <div style="margin-top:10px; opacity:0.7;">{minute}. minuta | xG: {xg_h:.2f} - {xg_a:.2f}</div>
+    {h_name} <b>{g_h} : {g_a}</b> {a_name}<br>
+    <small>Min: {minute}' | SoT: {sot_h} - {sot_a}</small>
 </div>
 """, unsafe_allow_html=True)
 
-# --- VÝPOČET ---
-if st.button("🚀 VYPOČÍTAT PREDIKCI", type="primary", use_container_width=True):
-    if model and feat_names:
-        h_n, a_n = normalize_name(h_team), normalize_name(a_team)
-        
-        # Načtení dat (s ošetřením chybějících hodnot)
-        eh = db_elo.get(h_n, 1500)
-        ea = db_elo.get(a_n, 1500)
-        fh = db_fifa.get(h_n, {'attack':75, 'defence':75, 'overall':75})
-        fa = db_fifa.get(a_n, {'attack':75, 'defence':75, 'overall':75})
-        ph = db_profiles.get(h_n, {'h_att': 1.4, 'h_def': 1.2, 'a_att': 1.1, 'a_def': 1.5})
-        pa = db_profiles.get(a_n, {'h_att': 1.4, 'h_def': 1.2, 'a_att': 1.1, 'a_def': 1.5})
-        
-        input_data = {
-            'minute': minute, 'time_remaining': 90 - minute,
-            'score_home': score_h, 'score_away': score_a,
-            'goal_diff': score_h - score_a, 'current_total_goals': score_h + score_a,
-            'is_draw': 1 if score_h == score_a else 0,
-            'xg_home': xg_h, 'xg_away': xg_a, 'xg_total': xg_h + xg_a, 'xg_diff': xg_h - xg_a,
-            'shots_home': shots_h, 'shots_away': shots_a,
-            'efficiency_h': score_h - xg_h, 'efficiency_a': score_a - xg_a,
-            'avg_shot_qual_h': (xg_h / shots_h) if shots_h > 0 else 0,
-            'elo_home': eh, 'elo_diff': eh - ea,
-            'fifa_att_diff': int(fh['attack']) - int(fa['attack']),
-            'fifa_def_diff': int(fh['defence']) - int(fa['defence']),
-            'squad_qual_diff': int(fh['overall']) - int(fa['overall']),
-            'home_team_home_att': ph['h_att'], 'home_team_home_def': ph['h_def'],
-            'away_team_away_att': pa['a_att'], 'away_team_away_def': pa['a_def']
+if st.button("🚀 PREDIKOVAT", type="primary", use_container_width=True):
+    if model:
+        # PŘÍPRAVA DAT
+        data = {
+            'minute': minute, 'time_remaining': 90-minute,
+            'score_home': g_h, 'score_away': g_a, 'goal_diff': g_h-g_a, 
+            'total_goals_current': g_h+g_a, # Teď jen jako kontext
+            'is_draw': 1 if g_h==g_a else 0,
+            
+            'xg_home': xg_h, 'xg_away': xg_a, 'xg_total': xg_h+xg_a, 'xg_diff': xg_h-xg_a,
+            'shots_home': sh_h, 'shots_away': sh_a, 'shots_total': sh_h+sh_a,
+            'sot_home': sot_h, 'sot_away': sot_a, 'sot_total': sot_h+sot_a, 'sot_diff': sot_h-sot_a,
+            
+            'efficiency_h': g_h-xg_h, 'efficiency_a': g_a-xg_a,
+            'conversion_rate_h': (g_h/sot_h) if sot_h>0 else 0,
+            'avg_shot_qual_h': (xg_h/sh_h) if sh_h>0 else 0
         }
         
-        df_in = pd.DataFrame([input_data])
+        df = pd.DataFrame([data])[feat_names]
         
-        try:
-            df_in = df_in[feat_names]
-            
-            # --- 🕵️ DEBUG SEKCE: PROČ JSOU VÝSLEDKY DIVNÉ? ---
-            with st.expander("🕵️ Rentgen Dat (Proč to vyšlo takhle?)"):
-                st.warning("Zkontroluj, zda hodnoty níže odpovídají realitě. Pokud vidíš '1.4' u útoku silného týmu, chybí data v CSV.")
-                
-                d_c1, d_c2, d_c3 = st.columns(3)
-                d_c1.metric("Elo Rozdíl", f"{input_data['elo_diff']:.0f}", help="Kladné = Domácí je favorit")
-                d_c2.metric(f"Útok {h_team}", f"{input_data['home_team_home_att']:.2f}", help="Průměr xG doma (Default 1.4)")
-                d_c3.metric(f"Obrana {a_team}", f"{input_data['away_team_away_def']:.2f}", help="Průměr xG proti venku (Default 1.5)")
-                
-                st.dataframe(df_in.T.style.format("{:.3f}"))
-            # -----------------------------------------------------
+        # PŘÍMÝ VÝSTUP MODELU = REMAINING GOALS
+        pred_remaining = model.predict(df)[0]
+        # Ošetření záporných čísel (nemůže padnout -0.1 gólu)
+        pred_remaining = max(0.0, pred_remaining)
+        
+        # Celkový očekávaný výsledek
+        expected_total = (g_h + g_a) + pred_remaining
+        
+        o, u, lamb = calculate_probs(pred_remaining, g_h+g_a)
+        
+        # --- VÝSLEDKY ---
+        c_res1, c_res2 = st.columns(2)
+        with c_res1:
+            st.markdown('<div style="background:#eee;padding:15px;border-radius:10px;">', unsafe_allow_html=True)
+            st.caption("AI Očekává ještě:")
+            st.title(f"+ {pred_remaining:.2f} gólů")
+            st.metric("Očekávaný TOTAL", f"{expected_total:.2f}")
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        with c_res2:
+            st.write("Sázky (O/U):")
+            for k,v in o.items(): 
+                val = v*100
+                color = "green" if val > 50 else "black"
+                st.write(f"{k}: :{color}[**{val:.1f}%**]")
 
-            pred_total = model.predict(df_in)[0]
-            over_probs, under_probs, expected_more = calculate_probs(pred_total, score_h + score_a)
-            
-            st.divider()
-            c_res1, c_res2 = st.columns([1, 1.3])
-            
-            with c_res1:
-                st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-                st.subheader("Očekávaný Total")
-                st.title(f"{pred_total:.2f}")
-                st.write(f"Zbývá gólů: **{expected_more:.2f}**")
-                st.markdown('</div>', unsafe_allow_html=True)
-            
-            with c_res2:
-                st.markdown("#### 🎲 Sázkové Příležitosti (O/U)")
-                current_g = score_h + score_a
-                lines = [current_g + 0.5, current_g + 1.5, current_g + 2.5]
-                
-                for line in lines:
-                    o_val = over_probs.get(f"Over {line}", 0)
-                    u_val = under_probs.get(f"Under {line}", 0)
-                    
-                    row_c1, row_c2, row_c3 = st.columns([1, 1, 1.2])
-                    color_o = "green" if o_val > 0.5 else "grey"
-                    color_u = "green" if u_val > 0.5 else "grey"
-                    
-                    row_c1.markdown(f"**⬆️ Over {line}**")
-                    row_c1.write(f":{color_o}[{o_val*100:.1f}%]")
-                    row_c2.markdown(f"**⬇️ Under {line}**")
-                    row_c2.write(f":{color_u}[{u_val*100:.1f}%]")
-                    row_c3.write("") 
-                    row_c3.progress(int(o_val*100))
-
-        except KeyError as e:
-            st.error(f"⚠️ Chyba ve struktuře dat: {e}")
     else:
-        st.error("Model není načten (zkontroluj ZIP na GitHubu).")
-
-st.write("")
-with st.expander("ℹ️ Informace o modelu"):
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    path_meta = os.path.join(current_dir, METADATA_FILENAME)
-    if os.path.exists(path_meta):
-        try:
-            with open(path_meta, "r") as f: meta = json.load(f)
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Chyba (MAE)", meta.get('mae_score', 'N/A'))
-            m2.metric("Zápasů v tréninku", f"{meta.get('training_rows_snapshots', 0)//90}")
-            m3.metric("Snapshot interval", "1 min")
-            m4.metric("Poslední update", meta.get('training_date', 'N/A'))
-        except: st.text("Metadata nelze přečíst.")
-    else: st.info("Metadata nejsou k dispozici.")
+        st.error("Model nenalezen.")
