@@ -1,0 +1,1 @@
+{"training_date": "05.02.2026 23:06", "model_type": "League Sensitive (One Feature)", "mae_score": 0.238, "features_count": 23, "training_rows_snapshots": 76294, "league_mapping": {"ENG-Premier League": 1, "ESP-La Liga": 2, "GER-Bundesliga": 3, "ITA-Serie A": 4, "FRA-Ligue 1": 5, "Premier League": 1, "La Liga": 2, "Bundesliga": 3, "Serie A": 4, "Ligue 1": 5}}
