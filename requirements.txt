@@ -4,4 +4,3 @@ numpy
 xgboost
 scikit-learn
 joblib
-plotly
